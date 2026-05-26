@@ -148,6 +148,8 @@ class BeatDetector:
 
     def set_bpm(self, bpm: float) -> None:
         """Override BPM with an externally sourced value and lock against audio drift."""
+        if bpm > 160.0:
+            bpm /= 2.0
         self.bpm = bpm
         self.beat_period = 60.0 / bpm
         self.bpm_stable = True

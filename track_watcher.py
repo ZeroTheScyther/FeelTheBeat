@@ -15,7 +15,7 @@ class TrackWatcher:
     _POLL_INTERVAL = 3.0
     _DEEZER_SEARCH_URL = "https://api.deezer.com/search"
     _DEEZER_TRACK_URL = "https://api.deezer.com/track"
-    _GETSONGBPM_URL = "https://api.getsongbpm.com/search/"
+    _GETSONGBPM_URL = "https://api.getsong.co/search/"
 
     def __init__(self, on_bpm_found: callable):
         self._on_bpm_found = on_bpm_found
@@ -41,9 +41,9 @@ class TrackWatcher:
                 self._current_track = track
                 artist, title = track
                 print(f"[track] Now playing: {artist} – {title}")
-                bpm = self._deezer_bpm(artist, title)
+                bpm = self._getsongbpm_bpm(artist, title)
                 if not bpm:
-                    bpm = self._getsongbpm_bpm(artist, title)
+                    bpm = self._deezer_bpm(artist, title)
                 if bpm:
                     self._on_bpm_found(bpm)
                 else:
@@ -80,7 +80,7 @@ class TrackWatcher:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 return json.loads(resp.read())
         except Exception as e:
-            print(f"[track] Deezer error: {e}")
+            print(f"[track] HTTP error: {e}")
             return None
 
     def _deezer_bpm(self, artist: str, title: str) -> float | None:
@@ -108,21 +108,39 @@ class TrackWatcher:
         query = urllib.parse.urlencode({
             "api_key": self._getsongbpm_key,
             "type": "song",
-            "lookup": f"{artist} {title}",
+            "lookup": title,
         })
         result = self._deezer_get(f"{self._GETSONGBPM_URL}?{query}")
         if not result:
             return None
-        items = result.get("search", [])
+        search = result.get("search", [])
+        # API returns {"search": {"error": "no result"}} when nothing found
+        if not search or isinstance(search, str) or (isinstance(search, dict) and "error" in search):
+            print(f"[track] GetSongBPM: no results for '{artist} – {title}'")
+            return None
+        # Response may be a list or a dict with numeric string keys
+        items = list(search.values()) if isinstance(search, dict) else list(search)
+        items = [i for i in items if isinstance(i, dict)]
         if not items:
             print(f"[track] GetSongBPM: no results for '{artist} – {title}'")
             return None
+        # Prefer a result whose artist name matches
+        artist_lower = artist.lower()
+        def _artist_name(item: dict) -> str:
+            a = item.get("artist", {})
+            if isinstance(a, dict):
+                return a.get("name", "").lower()
+            return str(a).lower()
+        best = next(
+            (i for i in items if artist_lower in _artist_name(i)),
+            items[0],
+        )
         try:
-            bpm = float(items[0].get("tempo", 0))
+            bpm = float(best.get("tempo") or 0)
         except (ValueError, TypeError):
             bpm = 0.0
         if bpm > 0:
             print(f"[track] GetSongBPM: {bpm:.1f}")
             return bpm
-        print(f"[track] GetSongBPM: track found but tempo is {items[0].get('tempo')!r}")
+        print(f"[track] GetSongBPM: track found but tempo is {best.get('tempo')!r}")
         return None
