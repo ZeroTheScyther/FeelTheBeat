@@ -12,6 +12,19 @@ Usage
     python main.py --heavy-threshold -45  # require louder sub-bass for heavy hits
     python main.py --filter-apps youtube,spotify  # only react to music apps
 
+Saving a setup
+--------------
+Add --save-config once to make the current flags the defaults, after which the
+app can be launched with no arguments at all — from the Start menu, the app
+menu, or a double-click:
+
+    python main.py --dual --heavy-mode adaptive --heavy-threshold -50 \
+                   --filter-apps youtube,spotify --save-config
+
+  --show-config    print what is saved
+  --reset-config   forget it
+  --no-dual        override a saved --dual for one run
+
 Controls
 --------
   Right-click tray icon → Unlock to drag the window, then Lock again.
@@ -21,101 +34,35 @@ Controls
 import argparse
 import os
 import queue
-import subprocess
 import sys
+
+from paths import app_dir, config_dir, setup_output
+
+IS_WINDOWS = sys.platform == "win32"
 
 
 def _load_dotenv() -> None:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-    except FileNotFoundError:
-        pass
-
-_load_dotenv()
-
-from PyQt5.QtWidgets import QApplication
-
-
-# ------------------------------------------------------------------
-# Device helpers
-# ------------------------------------------------------------------
-
-def list_input_devices() -> None:
-    import sounddevice as sd
-    print("\nAvailable input devices:")
-    for i, d in enumerate(sd.query_devices()):
-        if d["max_input_channels"] > 0:
-            print(f"  {i:2d}: {d['name']}")
-    print()
-    print("For system audio capture, use --device pulse (or --device pipewire)")
-    print("and ensure your monitor source is the default PulseAudio input.")
-    print("Run: pactl set-default-source <monitor-source-name>")
-    print("  or use pavucontrol → Input Devices → set the correct monitor as default.")
-
-
-def find_device_by_hint(hint: str) -> int | None:
-    """Accept a device index (int string) or a name substring."""
-    import sounddevice as sd
-    try:
-        idx = int(hint)
-        return idx
-    except ValueError:
-        pass
-    for i, d in enumerate(sd.query_devices()):
-        if hint.lower() in d["name"].lower() and d["max_input_channels"] > 0:
-            return i
-    return None
-
-
-def auto_pick_device() -> int | None:
-    """Find pulse / pipewire / default device by exact name."""
-    import sounddevice as sd
-    devices = sd.query_devices()
-    for keyword in ("pulse", "pipewire", "default"):
-        for i, d in enumerate(devices):
-            if d["name"].lower() == keyword and d["max_input_channels"] > 0:
-                return i
-    return None
-
-
-# ------------------------------------------------------------------
-# PulseAudio / PipeWire monitor auto-configuration
-# ------------------------------------------------------------------
-
-def configure_monitor_source() -> str | None:
-    """
-    Find the currently RUNNING monitor source via pactl and set it as
-    the PulseAudio default input so that 'pulse' captures system audio.
-    Returns the source name on success, None if nothing is found.
-    """
-    try:
-        r = subprocess.run(
-            ["pactl", "list", "sources", "short"],
-            capture_output=True, text=True, timeout=3,
-        )
-        for line in r.stdout.splitlines():
-            parts = line.split()
-            # fields: idx  name  driver  format  state  (state is last column)
-            if len(parts) >= 3 and "monitor" in parts[1] and parts[-1] == "RUNNING":
-                name = parts[1]
-                subprocess.run(
-                    ["pactl", "set-default-source", name],
-                    capture_output=True, timeout=3,
-                )
-                return name
-    except Exception:
-        pass
-    return None
+    """Load KEY=VALUE pairs from the first .env found, without overriding the env."""
+    candidates = [
+        config_dir() / ".env",
+        app_dir() / ".env",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    ]
+    for path in candidates:
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+            return
+        except OSError:
+            continue
 
 
 # ------------------------------------------------------------------
@@ -123,6 +70,11 @@ def configure_monitor_source() -> str | None:
 # ------------------------------------------------------------------
 
 def main() -> None:
+    # Windowed builds have no console: borrow the caller's terminal, or log to
+    # file.  Must happen before the first print().
+    log = setup_output()
+    _load_dotenv()
+
     ap = argparse.ArgumentParser(
         description="FeelTheBeat – beat-synced animation overlay",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -132,33 +84,25 @@ def main() -> None:
                     help="Audio input device index or name substring")
     ap.add_argument("--list-devices", action="store_true",
                     help="Print available input devices and exit")
-    ap.add_argument("--pos", default="100,100",
-                    help="Window top-left as X,Y  (default: 100,100)")
+    ap.add_argument("--pos", default=None,
+                    help="Window top-left as X,Y  (default: last saved position or 100,100)")
     ap.add_argument("--scale", type=float, default=1.0,
                     help="Frame scale factor  (default: 1.0; try 0.5 for half-size)")
     ap.add_argument("--heavy-mode", choices=["threshold", "adaptive"], default="threshold",
                     dest="heavy_mode",
-                    help="Heavy-hit detection: 'threshold' = absolute dBFS on sub-bass (default); "
-                         "'adaptive' = relative to recent beat history")
+                    help="Heavy-hit detection: 'threshold' = fixed dBFS on snare band (default); "
+                         "'adaptive' = threshold tracks rolling average of snare band level")
     ap.add_argument("--heavy-threshold", type=float, default=-50.0, dest="heavy_threshold",
-                    help="Sub-bass peak level (dBFS) required to trigger a heavy hit  (default: -50.0)")
+                    help="Snare band peak level (dBFS) required to trigger a heavy hit  (default: -50.0)")
+    ap.add_argument("--light-threshold", type=float, default=-65.0, dest="light_threshold",
+                    help="Light band peak level (dBFS) required to trigger a light hit  (default: -65.0)")
     ap.add_argument("--bass-sensitivity", type=float, default=1.0, dest="bass_sensitivity",
                     help="Adaptive mode: multiplier on the heavy-hit margin  (default: 1.0, higher = fewer heavy hits)")
-    ap.add_argument("--peak-hold", type=float, default=0.0, dest="peak_hold_ms",
-                    help="Hold the sub-bass peak for this many milliseconds to stabilise "
-                         "heavy/light decisions across a kick transient  (default: 0 = off, try 80)")
-    ap.add_argument("--light-threshold", type=float, default=-65.0, dest="light_threshold",
-                    help="Sub-bass peak level (dBFS) required to trigger a light hit in --bass-only mode  (default: -65.0)")
-    ap.add_argument("--bass-only", action="store_true", dest="bass_only",
-                    help="Only trigger light hits when sub-bass is present; drop non-bass onsets")
-    mode_group = ap.add_mutually_exclusive_group()
-    mode_group.add_argument("--phase-locked", action="store_const", const="phase-locked",
-                            dest="mode", help="Gate beats to a phase-locked tempo grid (default)")
-    mode_group.add_argument("--onset", action="store_const", const="onset",
-                            dest="mode", help="Fire on every detected onset directly, no phase gating")
-    ap.set_defaults(mode="phase-locked")
-    ap.add_argument("--continuous", action="store_true",
-                    help="Loop light hits at the BPM rate continuously; heavy hits interrupt on bass")
+    ap.add_argument("--heavy-band", choices=["snare", "kick"], default="snare", dest="heavy_band",
+                    help="Frequency band for heavy-hit detection: 'snare' = 220–270 Hz (default); 'kick' = 80–220 Hz")
+    ap.add_argument("--no-continuous", action="store_false", dest="continuous",
+                    help="Disable continuous light-hit loop (on by default)")
+    ap.set_defaults(continuous=True)
     ap.add_argument("--debug", action="store_true",
                     help="Open a real-time FFT spectrum window for threshold tuning")
     ap.add_argument("--filter-apps", default=None, dest="filter_apps",
@@ -166,23 +110,59 @@ def main() -> None:
                          "(e.g. 'youtube,spotify'). Beats are suppressed when none "
                          "of these apps have an active audio stream. "
                          "Default: no filter (all audio triggers beats).")
-    ap.add_argument("--band-mode", choices=["sub-bass", "bass-lowmid"], default="sub-bass",
-                    dest="band_mode",
-                    help="Frequency bands used for hit detection: "
-                         "'sub-bass' = 50-80 Hz for heavy (default); "
-                         "'bass-lowmid' = 80-250 Hz for heavy, 250-500 Hz for light")
+    ap.add_argument("--dual", action="store_true", dest="dual",
+                    help="Show two characters side by side across the full monitor width")
+    ap.add_argument("--no-dual", action="store_false", dest="dual",
+                    help="Disable dual mode (overrides a saved --dual)")
+    ap.set_defaults(dual=False)
     ap.add_argument("--no-monitor-detect", action="store_true",
-                    help="Skip automatic PulseAudio monitor source detection")
+                    help="Skip automatic PulseAudio monitor source detection (Linux only)")
+    ap.add_argument("--save-config", action="store_true", dest="save_config",
+                    help="Save the options given on this run as the defaults, then start "
+                         "normally. Afterwards the app can be launched with no arguments.")
+    ap.add_argument("--reset-config", action="store_true", dest="reset_config",
+                    help="Forget saved options and exit")
+    ap.add_argument("--show-config", action="store_true", dest="show_config",
+                    help="Print the saved options and exit")
+
+    # Saved options become the defaults; anything given on the command line
+    # still wins, because argparse applies explicit arguments over defaults.
+    from settings import (clear_options, load_options, load_settings,
+                          save_options, settings_path)
+    ap.set_defaults(**load_options())
+
     args = ap.parse_args()
+
+    if args.reset_config:
+        clear_options()
+        print(f"[config] Cleared saved options in {settings_path()}")
+        return
+    if args.show_config:
+        saved_opts = load_options()
+        print(f"[config] {settings_path()}")
+        if saved_opts:
+            for k, v in sorted(saved_opts.items()):
+                print(f"         {k} = {v!r}")
+        else:
+            print("         (none saved — run once with your flags plus --save-config)")
+        return
+    if args.save_config:
+        save_options(args)
+        print(f"[config] Saved launch options to {settings_path()}")
+
+    if log:
+        print(f"[log]   Logging to {log}")
+
+    import audio_backend
 
     # ── Device listing ─────────────────────────────────────────────────
     if args.list_devices:
-        list_input_devices()
+        audio_backend.list_input_devices()
         return
 
-    # ── Auto-configure monitor source ──────────────────────────────────
-    if not args.no_monitor_detect:
-        src = configure_monitor_source()
+    # ── Auto-configure monitor source (Linux; no-op on Windows) ────────
+    if not args.no_monitor_detect and not IS_WINDOWS:
+        src = audio_backend.configure_monitor_source()
         if src:
             print(f"[audio] Monitor source set: {src}")
         else:
@@ -193,19 +173,25 @@ def main() -> None:
 
     # ── Resolve audio device ───────────────────────────────────────────
     if args.device:
-        device = find_device_by_hint(args.device)
+        device = audio_backend.find_device_by_hint(args.device)
         if device is None:
             print(f"[error] Could not find device matching '{args.device}'")
             sys.exit(1)
     else:
-        device = auto_pick_device()
+        device = audio_backend.auto_pick_device()
 
     # ── Parse window position ──────────────────────────────────────────
-    try:
-        pos_x, pos_y = map(int, args.pos.split(","))
-    except ValueError:
-        print("[warn] Could not parse --pos; using 100,100")
-        pos_x, pos_y = 100, 100
+    saved = load_settings()
+    if args.pos:
+        try:
+            pos_x, pos_y = map(int, args.pos.split(","))
+        except ValueError:
+            print("[warn] Could not parse --pos; using saved or 100,100")
+            pos_x = saved.get("window_x", 100)
+            pos_y = saved.get("window_y", 100)
+    else:
+        pos_x = saved.get("window_x", 100)
+        pos_y = saved.get("window_y", 100)
 
     # ── Wire up components ─────────────────────────────────────────────
     bq: queue.Queue = queue.Queue()
@@ -214,22 +200,32 @@ def main() -> None:
     filter_apps = [s.strip() for s in args.filter_apps.split(",")] if args.filter_apps else None
 
     from beat_detector import BeatDetector
-    detector = BeatDetector(
-        device=device,
-        beat_queue=bq,
-        heavy_threshold_db=args.heavy_threshold,
-        light_threshold_db=args.light_threshold,
-        bass_only=args.bass_only,
-        filter_apps=filter_apps,
-        mode=args.mode,
-        heavy_mode=args.heavy_mode,
-        bass_sensitivity=args.bass_sensitivity,
-        peak_hold_ms=args.peak_hold_ms,
-        band_mode=args.band_mode,
-    )
-    print(f"[audio] Device index: {device!r}  |  Sample rate: {detector.SR} Hz  |  Mode: {args.mode}")
+    try:
+        detector = BeatDetector(
+            device=device,
+            beat_queue=bq,
+            heavy_threshold_db=args.heavy_threshold,
+            light_threshold_db=args.light_threshold,
+            filter_apps=filter_apps,
+            heavy_mode=args.heavy_mode,
+            bass_sensitivity=args.bass_sensitivity,
+            heavy_band=args.heavy_band,
+        )
+    except Exception as exc:
+        print(f"[error] Could not open audio capture: {exc}")
+        print("        Run with --list-devices to see what is available.")
+        sys.exit(1)
+    print(f"[audio] Device: {detector.device_name!r}  |  Sample rate: {detector.SR} Hz  "
+          f"|  Heavy mode: {args.heavy_mode}")
     if filter_apps:
         print(f"[audio] App filter active: {filter_apps}")
+
+    # HiDPI must be enabled before the QApplication exists, or the overlay lands
+    # in the wrong place on the 125/150 % scaling that is common on Windows.
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QApplication
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)   # keep alive when window is hidden
@@ -242,11 +238,14 @@ def main() -> None:
         continuous=args.continuous,
         get_bpm=lambda: detector.bpm,
         get_active=lambda: detector.is_audio_active,
+        queue_heavies=(args.heavy_band == "kick"),
+        dual=args.dual,
     )
 
     # ── BPM lookup via MPRIS + Deezer ─────────────────────────────────
     from track_watcher import TrackWatcher
-    watcher = TrackWatcher(on_bpm_found=detector.set_bpm)
+    watcher = TrackWatcher(on_bpm_found=detector.set_bpm,
+                           on_bpm_unavailable=detector.unlock_bpm)
     print("[track] TrackWatcher enabled (MPRIS + Deezer BPM lookup)")
 
     if args.debug:

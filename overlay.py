@@ -9,8 +9,12 @@ icon to drag the window to a new position, then lock again.
 
 import queue
 import re
+import sys
 import time
 from pathlib import Path
+
+from paths import resource_path
+from settings import load_settings, save_settings
 
 from PIL import Image
 from PyQt5.QtCore import Qt, QTimer
@@ -23,8 +27,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-FRAMES_DIR = Path(__file__).parent / "Frames"
+FRAMES_DIR = resource_path("Frames")
 FRAME_MS = 20  # 50 fps  (matches the 0.02 s delay baked into filenames)
+
+IS_WINDOWS = sys.platform == "win32"
+
+# Win32 extended window styles, for the click-through fallback below.
+_GWL_EXSTYLE = -20
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_TOOLWINDOW = 0x00000080
 
 
 def _load_frames(folder: Path) -> list[QPixmap]:
@@ -52,11 +64,16 @@ class OverlayWindow(QWidget):
                  scale: float = 1.0,
                  continuous: bool = False,
                  get_bpm: callable = None,
-                 get_active: callable = None):
+                 get_active: callable = None,
+                 queue_heavies: bool = False,
+                 dual: bool = False):
         super().__init__()
         self._beat_queue = beat_queue
         self._locked = True
         self._drag_origin = None
+        self._queue_heavies = queue_heavies
+        self._pending_heavy = False
+        self._dual = dual
 
         # ── Load animation frame sets ──────────────────────────────────
         self._light = _load_frames(FRAMES_DIR / "LightHit")
@@ -75,6 +92,7 @@ class OverlayWindow(QWidget):
             ]
 
         fw, fh = self._light[0].width(), self._light[0].height()
+        self._fw = fw
 
         # ── Animation state ────────────────────────────────────────────
         self._frames = self._light
@@ -82,8 +100,14 @@ class OverlayWindow(QWidget):
         self._current_pixmap: QPixmap = self._frames[self._frame_idx]
         self._playing = False
 
+        # ── Animation state (char 2 – dual mode) ──────────────────────
+        self._frames2 = self._light
+        self._frame_idx2 = len(self._light) - 1
+        self._current_pixmap2: QPixmap = self._frames2[self._frame_idx2]
+        self._playing2 = False
+
         # ── Flip state ────────────────────────────────────────────────
-        self._flipped = False
+        self._flipped = bool(load_settings().get("flipped", False))
 
 
         # ── Continuous BPM loop ────────────────────────────────────────
@@ -94,7 +118,8 @@ class OverlayWindow(QWidget):
 
         # ── Window setup ───────────────────────────────────────────────
         self.setWindowTitle("FeelTheBeat")
-        self.setFixedSize(fw, fh)
+        win_w = QApplication.primaryScreen().geometry().width() if dual else fw
+        self.setFixedSize(win_w, fh)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._apply_flags()
@@ -125,12 +150,33 @@ class OverlayWindow(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(self.rect(), Qt.transparent)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        fw = self._fw
+
+        # char 1
+        painter.save()
         if self._flipped:
             t = QTransform()
-            t.translate(self.width(), 0)
+            t.translate(fw, 0)
             t.scale(-1, 1)
             painter.setTransform(t)
         painter.drawPixmap(0, 0, self._current_pixmap)
+        painter.restore()
+
+        # char 2 — dual mode, always faces the opposite direction to char 1
+        if self._dual:
+            x2 = self.width() - fw
+            painter.save()
+            t = QTransform()
+            if not self._flipped:
+                t.translate(x2 + fw, 0)
+                t.scale(-1, 1)
+            else:
+                t.translate(x2, 0)
+            painter.setTransform(t)
+            painter.drawPixmap(0, 0, self._current_pixmap2)
+            painter.restore()
+
         painter.end()
 
     # ------------------------------------------------------------------
@@ -138,15 +184,42 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_flags(self) -> None:
-        flags = (Qt.FramelessWindowHint
-                 | Qt.WindowStaysOnTopHint
-                 | Qt.X11BypassWindowManagerHint)
+        flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        if sys.platform.startswith("linux"):
+            flags |= Qt.X11BypassWindowManagerHint
+        else:
+            # Keeps the overlay out of the Windows taskbar and Alt-Tab.
+            flags |= Qt.Tool
         if self._locked:
             flags |= Qt.WindowTransparentForInput
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.show()
+        self._apply_win32_clickthrough()
+
+    def _apply_win32_clickthrough(self) -> None:
+        """
+        Qt maps WindowTransparentForInput to WS_EX_TRANSPARENT, which only takes
+        effect on a layered window.  Set both explicitly so clicks reliably fall
+        through to whatever is underneath, and clear it again when unlocked so
+        the window can be dragged.
+        """
+        if not IS_WINDOWS:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            ex = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+            ex |= _WS_EX_LAYERED | _WS_EX_TOOLWINDOW
+            if self._locked:
+                ex |= _WS_EX_TRANSPARENT
+            else:
+                ex &= ~_WS_EX_TRANSPARENT
+            user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, ex)
+        except Exception as exc:
+            print(f"[ui] Could not apply Windows click-through: {exc}")
 
     def _toggle_lock(self) -> None:
         self._locked = not self._locked
@@ -159,6 +232,7 @@ class OverlayWindow(QWidget):
     def _toggle_flip(self) -> None:
         self._flipped = not self._flipped
         self._flip_act.setText("⬌ Flip  (face right)" if self._flipped else "⬌ Flip  (face left)")
+        save_settings({"flipped": self._flipped})
         self.update()
 
     # ------------------------------------------------------------------
@@ -166,7 +240,7 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_tray(self) -> None:
-        pm = QPixmap(16, 16)
+        pm = QPixmap(32, 32)
         pm.fill(QColor(255, 90, 30))
         self._tray = QSystemTrayIcon(QIcon(pm), self)
 
@@ -176,7 +250,7 @@ class OverlayWindow(QWidget):
         self._lock_act.triggered.connect(self._toggle_lock)
         menu.addAction(self._lock_act)
 
-        self._flip_act = QAction("⬌ Flip  (face left)", self)
+        self._flip_act = QAction("⬌ Flip  (face right)" if self._flipped else "⬌ Flip  (face left)", self)
         self._flip_act.triggered.connect(self._toggle_flip)
         menu.addAction(self._flip_act)
 
@@ -214,9 +288,12 @@ class OverlayWindow(QWidget):
                 anim, bpm = self._beat_queue.get_nowait()
                 self._bpm_act.setText(f"BPM: {bpm:.0f}")
                 if anim == "heavy":
-                    self._fire("heavy")
-                    if self._continuous:
-                        self._next_beat_t = now + 60.0 / max(self._get_bpm(), 1.0)
+                    if self._queue_heavies:
+                        self._pending_heavy = True
+                    else:
+                        self._fire("heavy")
+                        if self._continuous:
+                            self._next_beat_t = now + 60.0 / max(self._get_bpm(), 1.0)
                 elif not self._continuous:
                     self._fire("light")
         except queue.Empty:
@@ -225,39 +302,51 @@ class OverlayWindow(QWidget):
         # Continuous light loop
         if self._continuous:
             if not self._get_active():
-                # No music playing — stay ready to fire immediately on resume
                 self._next_beat_t = now
             elif now >= self._next_beat_t:
                 bpm = max(self._get_bpm(), 1.0)
                 self._next_beat_t = now + 60.0 / bpm
                 self._bpm_act.setText(f"BPM: {bpm:.0f}")
-                self._fire("light")
+                if self._pending_heavy:
+                    self._pending_heavy = False
+                    self._fire("heavy")
+                else:
+                    self._fire("light")
 
     # ------------------------------------------------------------------
     # Animation
     # ------------------------------------------------------------------
 
     def _fire(self, anim: str) -> None:
-        """Trigger (or restart) the given animation from frame 0."""
-        self._frames = self._heavy if anim == "heavy" else self._light
+        frames = self._heavy if anim == "heavy" else self._light
+        self._frames = frames
         self._frame_idx = 0
-        self._current_pixmap = self._frames[0]
+        self._current_pixmap = frames[0]
         self._playing = True
+        if self._dual:
+            self._frames2 = frames
+            self._frame_idx2 = 0
+            self._current_pixmap2 = frames[0]
+            self._playing2 = True
         self.update()
         if not self._anim_timer.isActive():
             self._anim_timer.start()
 
     def _step(self) -> None:
-        """Advance one frame; stop at the last frame (hold idle pose)."""
-        if not self._playing:
+        if self._playing:
+            self._frame_idx += 1
+            if self._frame_idx >= len(self._frames):
+                self._frame_idx = len(self._frames) - 1
+                self._playing = False
+            self._current_pixmap = self._frames[self._frame_idx]
+        if self._dual and self._playing2:
+            self._frame_idx2 += 1
+            if self._frame_idx2 >= len(self._frames2):
+                self._frame_idx2 = len(self._frames2) - 1
+                self._playing2 = False
+            self._current_pixmap2 = self._frames2[self._frame_idx2]
+        if not self._playing and not (self._dual and self._playing2):
             self._anim_timer.stop()
-            return
-        self._frame_idx += 1
-        if self._frame_idx >= len(self._frames):
-            self._frame_idx = len(self._frames) - 1
-            self._playing = False
-            self._anim_timer.stop()
-        self._current_pixmap = self._frames[self._frame_idx]
         self.update()
 
     # ------------------------------------------------------------------
@@ -274,6 +363,9 @@ class OverlayWindow(QWidget):
             self.move(ev.globalPos() - self._drag_origin)
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self._drag_origin is not None:
+            pos = self.frameGeometry().topLeft()
+            save_settings({"window_x": pos.x(), "window_y": pos.y()})
         self._drag_origin = None
 
     # ------------------------------------------------------------------
@@ -281,5 +373,7 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     def closeEvent(self, ev) -> None:
+        pos = self.frameGeometry().topLeft()
+        save_settings({"window_x": pos.x(), "window_y": pos.y()})
         self._tray.hide()
         ev.accept()

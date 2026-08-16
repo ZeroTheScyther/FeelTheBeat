@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: feelthebeat-linux
+          - os: windows-latest
+            artifact: feelthebeat-windows
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # build_deb.sh reads the version from git describe
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # PyQt5 needs these to load its xcb platform plugin at build/inspect time.
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libxcb-cursor0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libegl1
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Generate icons
+        run: python packaging/make_icon.py
+
+      - name: Build Windows bundle
+        if: runner.os == 'Windows'
+        run: python -m PyInstaller --noconfirm --clean FeelTheBeat.spec
+
+      - name: Build Linux bundle and .deb
+        if: runner.os == 'Linux'
+        run: bash packaging/build_deb.sh
+
+      - name: Smoke test the bundle
+        if: runner.os == 'Windows'
+        run: dist/FeelTheBeat/FeelTheBeat.exe --list-devices
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/FeelTheBeat/
+            dist/*.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip the Windows bundle
+        run: |
+          cd artifacts/feelthebeat-windows
+          zip -r ../../FeelTheBeat-windows.zip .
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            FeelTheBeat-windows.zip
+            artifacts/feelthebeat-linux/*.deb
+          generate_release_notes: true

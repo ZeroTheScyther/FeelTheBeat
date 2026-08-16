@@ -1,0 +1,17 @@
+numpy>=1.26
+scipy>=1.11
+Pillow>=10
+PyQt5>=5.15
+
+# Linux/macOS system-audio capture.
+sounddevice>=0.5 ; sys_platform != "win32"
+
+# Windows system-audio capture: sounddevice has no WASAPI loopback support,
+# so Windows uses this PortAudio fork instead.  Deliberately not installed on
+# Linux so only one PortAudio build ever ships.
+PyAudioWPatch>=0.2.12.8 ; sys_platform == "win32"
+
+# Windows --filter-apps (Core Audio sessions) and now-playing lookup.
+pycaw>=20240210 ; sys_platform == "win32"
+winrt-Windows.Media.Control>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2.1 ; sys_platform == "win32"

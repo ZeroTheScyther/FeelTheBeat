@@ -1,14 +1,16 @@
 """
-TrackWatcher — polls MPRIS (via playerctl) for the current track and
-retrieves BPM from the Deezer API (no API key required).
+TrackWatcher — polls the platform's now-playing source for the current track
+(MPRIS on Linux, GlobalSystemMediaTransportControls on Windows) and retrieves
+BPM from GetSongBPM, falling back to Deezer.
 """
 
 import json
 import os
-import subprocess
 import threading
 import urllib.parse
 import urllib.request
+
+import media_session
 
 
 class TrackWatcher:
@@ -17,8 +19,9 @@ class TrackWatcher:
     _DEEZER_TRACK_URL = "https://api.deezer.com/track"
     _GETSONGBPM_URL = "https://api.getsong.co/search/"
 
-    def __init__(self, on_bpm_found: callable):
+    def __init__(self, on_bpm_found: callable, on_bpm_unavailable: callable = None):
         self._on_bpm_found = on_bpm_found
+        self._on_bpm_unavailable = on_bpm_unavailable
         self._current_track: tuple[str, str] | None = None
         self._stop_event = threading.Event()
         self._getsongbpm_key: str | None = os.environ.get("GETSONGBPM_API_KEY")
@@ -47,28 +50,16 @@ class TrackWatcher:
                 if bpm:
                     self._on_bpm_found(bpm)
                 else:
-                    print(f"[track] BPM not found; keeping current BPM")
+                    print(f"[track] BPM not found; falling back to audio detection")
+                    if self._on_bpm_unavailable:
+                        self._on_bpm_unavailable()
 
     # ------------------------------------------------------------------
-    # MPRIS / playerctl
+    # Now playing
     # ------------------------------------------------------------------
 
     def _get_current_track(self) -> tuple[str, str] | None:
-        try:
-            r = subprocess.run(
-                ["playerctl", "metadata", "--format", "{{artist}}\t{{title}}"],
-                capture_output=True, text=True, timeout=2,
-            )
-            if r.returncode != 0 or not r.stdout.strip():
-                return None
-            parts = r.stdout.strip().split("\t", 1)
-            if len(parts) != 2 or not all(parts):
-                return None
-            return parts[0].strip(), parts[1].strip()
-        except FileNotFoundError:
-            return None
-        except Exception:
-            return None
+        return media_session.get_current_track()
 
     # ------------------------------------------------------------------
     # Deezer BPM

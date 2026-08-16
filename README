@@ -1,3 +1,92 @@
-I regret all of my choices.
+FeelTheBeat — beat-synced desktop overlay visualizer
+====================================================
 
-BPM data provided by [GetSongBPM](https://getsongbpm.com)
+Captures system audio, detects beats with per-band spectral flux onset
+detection, and plays a transparent click-through animation overlay in time
+with the music.  Runs on Linux and Windows.
+
+
+Running
+-------
+
+Installed, it is a normal application: launch FeelTheBeat from the Start menu
+(Windows) or the application menu (Linux), or run `feelthebeat` from a shell.
+No launcher script, no flags.
+
+From source:
+
+    pip install -r requirements.txt
+    python main.py
+
+Linux captures the PulseAudio/PipeWire monitor source (auto-selected via
+pactl).  Windows captures the default output device through WASAPI loopback,
+so no device configuration is needed.
+
+
+Saving a setup
+--------------
+
+Pass your flags once with --save-config; they become the defaults and the app
+can then be started with no arguments at all, including by double-click:
+
+    feelthebeat --dual --heavy-mode adaptive --heavy-threshold -50 \
+                --filter-apps youtube,spotify --save-config
+
+    feelthebeat            # from now on, same thing
+
+    feelthebeat --show-config     # print what is saved
+    feelthebeat --reset-config    # forget it
+    feelthebeat --no-dual         # override a saved --dual for one run
+
+Flags given on the command line always beat saved ones.  Window position and
+flip direction are saved automatically when you move or flip the overlay.
+
+    python main.py --list-devices     # see what can be captured
+
+
+Optional integrations
+---------------------
+
+  Now-playing BPM lookup   Linux: playerctl (MPRIS)
+                           Windows: built in (WinRT media session)
+
+  --filter-apps            Linux: pactl (pulseaudio-utils)
+                           Windows: built in (pycaw / Core Audio sessions)
+
+BPM data provided by GetSongBPM (https://getsongbpm.com).  To use it, put your
+key in a .env file:
+
+    GETSONGBPM_API_KEY=your_key_here
+
+.env is read from the config directory first, then next to the executable,
+then next to the source.  Without a key, BPM falls back to Deezer and then to
+audio-only autocorrelation estimation.
+
+
+Where state lives
+-----------------
+
+    Linux     ~/.config/FeelTheBeat/
+    Windows   %APPDATA%\FeelTheBeat\
+
+Holds settings.json (window position, flip state), an optional .env, and — for
+the packaged Windows build launched from Explorer — feelthebeat.log.  Launching
+the .exe from cmd/PowerShell prints to that terminal instead.
+
+
+Building packages
+-----------------
+
+    pip install -r requirements.txt -r requirements-build.txt
+    python packaging/make_icon.py
+
+    bash packaging/build_deb.sh                        # Linux .deb
+    python -m PyInstaller --noconfirm FeelTheBeat.spec # Windows .exe bundle
+
+PyInstaller cannot cross-compile, so the .exe must be built on Windows.
+.github/workflows/build.yml builds both on every push and attaches them to a
+GitHub Release on any v* tag.
+
+Install the .deb with:
+
+    sudo apt install ./dist/feelthebeat_<version>_amd64.deb

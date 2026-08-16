@@ -1,0 +1,1 @@
+python3 main.py --heavy-threshold -50 --filter youtube,spotify --heavy-mode adaptive --dual
