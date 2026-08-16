@@ -43,7 +43,7 @@ a = Analysis(
     ["main.py"],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[("Frames", "Frames")],
+    datas=[("Frames", "Frames"), ("assets", "assets")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

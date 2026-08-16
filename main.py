@@ -127,8 +127,11 @@ def main() -> None:
 
     # Saved options become the defaults; anything given on the command line
     # still wins, because argparse applies explicit arguments over defaults.
-    from settings import (clear_options, load_options, load_settings,
-                          save_options, settings_path)
+    from settings import (OPTION_KEYS, clear_options, load_options,
+                          load_settings, save_options, settings_path)
+    # Capture the built-in defaults first — Settings' "Reset to defaults"
+    # restores these, not whatever happens to be saved.
+    cli_defaults = {k: ap.get_default(k) for k in OPTION_KEYS}
     ap.set_defaults(**load_options())
 
     args = ap.parse_args()
@@ -220,6 +223,16 @@ def main() -> None:
     if filter_apps:
         print(f"[audio] App filter active: {filter_apps}")
 
+    # Windows groups windows (and picks the taskbar icon) by AppUserModelID;
+    # without this the app inherits the host Python's identity and icon.
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "ZeroTheScyther.FeelTheBeat")
+        except Exception as exc:
+            print(f"[ui] Could not set AppUserModelID: {exc}")
+
     # HiDPI must be enabled before the QApplication exists, or the overlay lands
     # in the wrong place on the 125/150 % scaling that is common on Windows.
     from PyQt5.QtCore import Qt
@@ -229,6 +242,11 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)   # keep alive when window is hidden
+    app.setApplicationName("FeelTheBeat")
+    app.setDesktopFileName("feelthebeat")  # links to the installed .desktop entry
+
+    from icons import app_icon
+    app.setWindowIcon(app_icon())
 
     from overlay import OverlayWindow
     _win = OverlayWindow(
@@ -240,6 +258,8 @@ def main() -> None:
         get_active=lambda: detector.is_audio_active,
         queue_heavies=(args.heavy_band == "kick"),
         dual=args.dual,
+        detector=detector,
+        defaults=cli_defaults,
     )
 
     # ── BPM lookup via MPRIS + Deezer ─────────────────────────────────
@@ -249,9 +269,8 @@ def main() -> None:
     print("[track] TrackWatcher enabled (MPRIS + Deezer BPM lookup)")
 
     if args.debug:
-        from spectrum_window import SpectrumWindow
-        _spec_win = SpectrumWindow(detector)
-        _spec_win.show()
+        # Same entry point the Settings button uses, so the two cannot drift.
+        _win.open_visualizer()
         print("[debug] Spectrum window open.")
 
     try:
@@ -259,7 +278,7 @@ def main() -> None:
         if watcher:
             watcher.start()
         print("[audio] Stream started.")
-        print("[ui]    Right-click the tray icon (orange dot) to unlock/quit.")
+        print("[ui]    Click the tray icon for Settings, Donate and Quit.")
         sys.exit(app.exec_())
     except Exception as exc:
         print(f"[error] {exc}")

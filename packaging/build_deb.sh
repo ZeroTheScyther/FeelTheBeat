@@ -30,7 +30,7 @@ mkdir -p "$STAGE/DEBIAN" \
          "$STAGE/usr/share/icons/hicolor/256x256/apps"
 
 cp -a dist/FeelTheBeat/. "$STAGE/opt/FeelTheBeat/"
-cp assets/icon.png "$STAGE/usr/share/icons/hicolor/256x256/apps/feelthebeat.png"
+cp assets/icon-256.png "$STAGE/usr/share/icons/hicolor/256x256/apps/feelthebeat.png"
 
 cat > "$STAGE/usr/bin/feelthebeat" <<'EOF'
 #!/bin/sh

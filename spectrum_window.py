@@ -12,6 +12,8 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QFontDatabase, QPainter, QPen
 from PyQt5.QtWidgets import QWidget
 
+from icons import app_icon
+
 
 def _mono_font(size: int):
     """'Monospace' is not a real family on Windows; ask Qt for the system one."""
@@ -49,6 +51,7 @@ class SpectrumWindow(QWidget):
         super().__init__()
         self._det = detector
 
+        self.setWindowIcon(app_icon())
         self.setWindowTitle("FeelTheBeat — Spectrum Debug")
         self.setMinimumSize(800, 280)
         self.resize(900, 300)
@@ -80,8 +83,9 @@ class SpectrumWindow(QWidget):
         sr           = self._det.SR
         fpb          = sr / fft_size
         threshold    = self._det._effective_heavy_threshold
-        heavy_lo_hz  = int(self._det.yellow_lo * fpb)
-        heavy_hi_hz  = int(self._det.yellow_hi * fpb)
+        yellow_lo, yellow_hi = self._det.heavy_bins   # may change live
+        heavy_lo_hz  = int(yellow_lo * fpb)
+        heavy_hi_hz  = int(yellow_hi * fpb)
 
         # ── Per-band peak dB ──────────────────────────────────────────
         band_db = np.full(NUM_BANDS, DB_MIN, dtype="float32")
@@ -140,14 +144,14 @@ class SpectrumWindow(QWidget):
         painter.drawText(x_y_hi + 2, pt + 10, f"{heavy_hi_hz} Hz (heavy)")
 
         # ── Live readout ───────────────────────────────────────────────
-        h_peak = float(np.max(mag[self._det.yellow_lo : self._det.yellow_hi + 1]))
+        h_peak = float(np.max(mag[yellow_lo : yellow_hi + 1]))
         h_db   = 20.0 * np.log10(h_peak / (fft_size / 2) + 1e-9)
         hit    = "HEAVY" if h_db >= threshold else "none"
 
         painter.setPen(QColor(210, 210, 210))
         painter.setFont(_mono_font(9))
         painter.drawText(pl + 6, pt + dh - 4,
-                         f"220-270Hz: {h_db:+.1f} dB   "
+                         f"{heavy_lo_hz}-{heavy_hi_hz}Hz: {h_db:+.1f} dB   "
                          f"threshold: {threshold:.0f} dB   "
                          f"BPM: {self._det.bpm:.0f}   "
                          f"hit: {hit}")

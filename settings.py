@@ -63,9 +63,14 @@ def load_options() -> dict:
     return {k: v for k, v in opts.items() if k in OPTION_KEYS}
 
 
+def save_options_dict(opts: dict) -> None:
+    """Persist a plain options dict as the new defaults."""
+    save_settings({"options": {k: opts[k] for k in OPTION_KEYS if k in opts}})
+
+
 def save_options(args) -> None:
     """Persist the current launch options as the new defaults."""
-    save_settings({"options": {k: getattr(args, k) for k in OPTION_KEYS}})
+    save_options_dict({k: getattr(args, k) for k in OPTION_KEYS})
 
 
 def clear_options() -> None:

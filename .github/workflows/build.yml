@@ -15,16 +15,20 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: feelthebeat-linux
+            # The .deb already contains the bundle; uploading dist/FeelTheBeat/
+            # as well would ship the same payload twice.
+            artifact_path: dist/*.deb
           - os: windows-latest
             artifact: feelthebeat-windows
+            artifact_path: dist/FeelTheBeat/
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0    # build_deb.sh reads the version from git describe
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -57,12 +61,10 @@ jobs:
         run: dist/FeelTheBeat/FeelTheBeat.exe --list-devices
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/FeelTheBeat/
-            dist/*.deb
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
   release:
@@ -72,7 +74,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -82,9 +84,11 @@ jobs:
           zip -r ../../FeelTheBeat-windows.zip .
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            FeelTheBeat-windows.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --generate-notes \
+            FeelTheBeat-windows.zip \
             artifacts/feelthebeat-linux/*.deb
-          generate_release_notes: true

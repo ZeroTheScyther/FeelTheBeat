@@ -22,6 +22,15 @@ import app_filter
 from audio_backend import create_capture
 
 
+def _heavy_band_bins(freq_per_bin: float, band: str) -> tuple[int, int]:
+    """FFT bin range for the heavy band: snare (240–260 Hz) or kick (80–220 Hz)."""
+    if band == "kick":
+        lo, hi = 80, 220
+    else:
+        lo, hi = 240, 260
+    return max(1, int(lo / freq_per_bin)), max(2, int(hi / freq_per_bin))
+
+
 class BeatDetector:
     HOP = 512        # audio block size (≈ 11 ms at 48 kHz)
     FFT_SIZE = 2048  # zero-padded FFT for better frequency resolution
@@ -42,6 +51,7 @@ class BeatDetector:
 
         self._filter_apps = [s.lower() for s in filter_apps] if filter_apps else None
         self._filter_active = True
+        self._filter_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
         # The capture backend resolves the device and its sample rate, so it
@@ -51,18 +61,16 @@ class BeatDetector:
         self.device_name = self._capture.device_name
 
         self.hop_rate = self.SR / self.HOP
-        freq_per_bin = self.SR / self.FFT_SIZE
+        self._freq_per_bin = self.SR / self.FFT_SIZE
 
         # Light band: 0–80 Hz
         self.orange_lo = 1  # skip DC bin
-        self.orange_hi = max(2, int(80 / freq_per_bin))
-        # Heavy band: snare (220–270 Hz) or kick (80–220 Hz)
-        if heavy_band == "kick":
-            self.yellow_lo = max(1, int(80 / freq_per_bin))
-            self.yellow_hi = max(2, int(220 / freq_per_bin))
-        else:
-            self.yellow_lo = max(1, int(240 / freq_per_bin))
-            self.yellow_hi = max(2, int(260 / freq_per_bin))
+        self.orange_hi = max(2, int(80 / self._freq_per_bin))
+        # Heavy band, held as one tuple: the audio thread reads it while the GUI
+        # thread may rewrite it, and a single assignment cannot be torn into a
+        # mismatched lo/hi pair.
+        self.heavy_band = heavy_band
+        self.heavy_bins: tuple[int, int] = _heavy_band_bins(self._freq_per_bin, heavy_band)
 
         # Rolling heavy-band dB history for adaptive mode
         self.heavy_db_hist: deque[float] = deque(maxlen=20)
@@ -104,14 +112,62 @@ class BeatDetector:
 
     def start(self) -> None:
         self._capture.start()
-
-        if self._filter_apps:
-            t = threading.Thread(target=self._app_filter_loop, daemon=True)
-            t.start()
+        self._ensure_filter_thread()
 
     def stop(self) -> None:
         self._stop_event.set()
         self._capture.stop()
+
+    # ------------------------------------------------------------------
+    # Live settings  (called from the GUI thread while audio is running)
+    # ------------------------------------------------------------------
+
+    def apply_settings(self, opts: dict) -> None:
+        """
+        Apply any subset of settings.OPTION_KEYS immediately.
+
+        Everything here is either a lone attribute swap or a single tuple
+        assignment, so the audio thread always sees a coherent value.
+        'device' is not handled — changing it needs a restart.
+        """
+        if "heavy_threshold" in opts:
+            self.heavy_threshold_db = float(opts["heavy_threshold"])
+        if "light_threshold" in opts:
+            self.light_threshold_db = float(opts["light_threshold"])
+        if "bass_sensitivity" in opts:
+            self._bass_sensitivity = float(opts["bass_sensitivity"])
+
+        if "heavy_mode" in opts and opts["heavy_mode"] != self._heavy_mode:
+            self._heavy_mode = opts["heavy_mode"]
+            # Drop the adaptive history so a stale threshold cannot leak across.
+            self._reset_adaptive()
+
+        if "heavy_band" in opts and opts["heavy_band"] != self.heavy_band:
+            self.heavy_band = opts["heavy_band"]
+            self.heavy_bins = _heavy_band_bins(self._freq_per_bin, self.heavy_band)
+            self._reset_adaptive()
+
+        if "filter_apps" in opts:
+            self.set_filter_apps(opts["filter_apps"])
+
+    def set_filter_apps(self, apps) -> None:
+        """Accepts a comma-separated string, a list, or None/empty to disable."""
+        if isinstance(apps, str):
+            apps = [s.strip() for s in apps.split(",") if s.strip()]
+        self._filter_apps = [s.lower() for s in apps] if apps else None
+        if self._filter_apps:
+            self._ensure_filter_thread()
+        else:
+            # Never leave beats suppressed by a filter that is no longer active.
+            self._filter_active = True
+
+    def _ensure_filter_thread(self) -> None:
+        if not self._filter_apps:
+            return
+        if self._filter_thread is not None and self._filter_thread.is_alive():
+            return
+        self._filter_thread = threading.Thread(target=self._app_filter_loop, daemon=True)
+        self._filter_thread.start()
 
     def set_bpm(self, bpm: float) -> None:
         """Override BPM with an externally sourced value and lock against audio drift."""
@@ -166,14 +222,17 @@ class BeatDetector:
         buf[: len(audio)] = audio * np.hanning(len(audio))
         mag = np.abs(np.fft.rfft(buf))
 
+        # Read the band once per block: the GUI thread can swap it mid-callback.
+        yellow_lo, yellow_hi = self.heavy_bins
+
         if self._prev_mag is not None:
             flux = float(np.sum(np.maximum(mag - self._prev_mag, 0.0)))
             light_flux = float(np.sum(np.maximum(
                 mag[self.orange_lo:self.orange_hi + 1]
                 - self._prev_mag[self.orange_lo:self.orange_hi + 1], 0.0)))
             heavy_flux = float(np.sum(np.maximum(
-                mag[self.yellow_lo:self.yellow_hi + 1]
-                - self._prev_mag[self.yellow_lo:self.yellow_hi + 1], 0.0)))
+                mag[yellow_lo:yellow_hi + 1]
+                - self._prev_mag[yellow_lo:yellow_hi + 1], 0.0)))
         else:
             flux = light_flux = heavy_flux = 0.0
 
@@ -183,7 +242,7 @@ class BeatDetector:
 
         orange_peak = float(np.max(mag[self.orange_lo : self.orange_hi + 1]))
         light_db = 20.0 * np.log10(orange_peak / (self.FFT_SIZE / 2) + 1e-9)
-        yellow_peak = float(np.max(mag[self.yellow_lo : self.yellow_hi + 1]))
+        yellow_peak = float(np.max(mag[yellow_lo : yellow_hi + 1]))
         heavy_db = 20.0 * np.log10(yellow_peak / (self.FFT_SIZE / 2) + 1e-9)
 
         self.onset_env.append(flux)

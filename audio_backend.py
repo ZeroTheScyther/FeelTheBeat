@@ -216,6 +216,33 @@ def _list_windows_devices() -> None:
         pa.terminate()
 
 
+def enumerate_devices() -> list[tuple[int, str]]:
+    """(index, name) for every capturable device — for the Settings dropdown."""
+    out: list[tuple[int, str]] = []
+    if IS_WINDOWS:
+        import pyaudiowpatch as pyaudio
+        pa = pyaudio.PyAudio()
+        try:
+            try:
+                for d in pa.get_loopback_device_info_generator():
+                    out.append((int(d["index"]), f"{d['name']}  (loopback)"))
+            except Exception:
+                pass
+            for i in range(pa.get_device_count()):
+                d = pa.get_device_info_by_index(i)
+                if d["maxInputChannels"] > 0 and not d.get("isLoopbackDevice", False):
+                    out.append((i, str(d["name"])))
+        finally:
+            pa.terminate()
+        return out
+
+    import sounddevice as sd
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] > 0:
+            out.append((i, str(d["name"])))
+    return out
+
+
 def find_device_by_hint(hint: str) -> int | None:
     """Accept a device index (int string) or a name substring."""
     try:

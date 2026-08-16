@@ -23,8 +23,40 @@ pactl).  Windows captures the default output device through WASAPI loopback,
 so no device configuration is needed.
 
 
-Saving a setup
---------------
+The tray icon
+-------------
+
+Click the tray icon for:
+
+    ⚙  Settings…      every tunable, applied live
+    ☕  Donate         ko-fi.com/zerothescyther
+    🔓 Unlock         drag the overlay, then Lock again
+    ⬌  Flip           face left / right
+       Quit
+
+Hovering the tray icon shows the current BPM.  Double-clicking it toggles the
+lock.
+
+Settings
+--------
+
+Everything applies immediately — drag a threshold and it takes effect on the
+next audio block — but nothing is written to disk until you press Save.
+Revert restores the values from when you opened the window; Reset to defaults
+restores the built-in ones.
+
+"Open Visualizer" brings up the live spectrum view, which is the point of the
+live thresholds: put the two side by side and drag Heavy threshold until the
+dashed red line sits just above the noise and only the snare crosses it.
+
+Lock and Flip are the exception — like their tray counterparts they apply and
+save immediately.  The input device is the other exception: it is saved on
+Save but only takes effect on restart, since a different device can mean a
+different sample rate and that resizes the detector's whole FFT band layout.
+
+
+Saving a setup from the command line
+------------------------------------
 
 Pass your flags once with --save-config; they become the defaults and the app
 can then be started with no arguments at all, including by double-click:
@@ -72,6 +104,15 @@ Where state lives
 Holds settings.json (window position, flip state), an optional .env, and — for
 the packaged Windows build launched from Explorer — feelthebeat.log.  Launching
 the .exe from cmd/PowerShell prints to that terminal instead.
+
+
+Icons
+-----
+
+assets/icon.png is the artwork master.  packaging/make_icon.py derives
+assets/icon.ico (multi-resolution, for the Windows exe, tray and taskbar) and
+assets/icon-256.png (for the Linux hicolor theme); both are generated, and only
+the master is committed.  Replace icon.png and re-run it to change the icon.
 
 
 Building packages

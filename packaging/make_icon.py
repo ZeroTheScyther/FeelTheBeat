@@ -1,6 +1,13 @@
 """
-Generate assets/icon.ico (Windows) and assets/icon.png (Linux desktop entry)
-from the first HeavyHit frame, so no binary asset needs committing.
+Derive the packaging icons from assets/icon.png (the artwork master).
+
+  assets/icon.ico      multi-resolution, for the Windows exe/tray/taskbar
+  assets/icon-256.png  exactly 256x256, for the Linux hicolor theme
+
+Windows picks the nearest embedded size for the 16 px tray; a single-resolution
+.ico gets downscaled on the fly and looks soft.  The freedesktop hicolor spec
+likewise expects the image in .../256x256/apps/ to actually be 256x256.
+Idempotent — safe to re-run.
 """
 
 import sys
@@ -10,22 +17,19 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
+SOURCE = ASSETS / "icon.png"
+TARGET_ICO = ASSETS / "icon.ico"
+TARGET_PNG = ASSETS / "icon-256.png"
 ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 
 
-def source_frame() -> Path:
-    frames = sorted((ROOT / "Frames" / "HeavyHit").glob("*.gif"))
-    if not frames:
-        sys.exit("[icon] No frames found in Frames/HeavyHit")
-    # Mid-sequence frame: the character is fully in shot rather than mid-idle.
-    return frames[len(frames) // 3]
-
-
 def main() -> None:
-    src = source_frame()
-    img = Image.open(src).convert("RGBA")
+    if not SOURCE.exists():
+        sys.exit(f"[icon] Missing {SOURCE}")
 
-    bbox = img.getbbox()          # trim the transparent margin
+    img = Image.open(SOURCE).convert("RGBA")
+
+    bbox = img.getbbox()          # trim any transparent margin
     if bbox:
         img = img.crop(bbox)
 
@@ -33,10 +37,13 @@ def main() -> None:
     square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     square.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
 
-    ASSETS.mkdir(exist_ok=True)
-    square.resize((256, 256), Image.LANCZOS).save(ASSETS / "icon.png")
-    square.save(ASSETS / "icon.ico", format="ICO", sizes=ICO_SIZES)
-    print(f"[icon] Wrote {ASSETS/'icon.png'} and {ASSETS/'icon.ico'} from {src.name}")
+    big = square.resize((256, 256), Image.LANCZOS)
+
+    # Pillow resamples down from this single image per requested size.
+    big.save(TARGET_ICO, format="ICO", sizes=ICO_SIZES)
+    big.save(TARGET_PNG, format="PNG")
+    print(f"[icon] Wrote {TARGET_ICO} with sizes {[s[0] for s in ICO_SIZES]}")
+    print(f"[icon] Wrote {TARGET_PNG} (256x256)")
 
 
 if __name__ == "__main__":
